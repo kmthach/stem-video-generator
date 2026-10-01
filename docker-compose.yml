@@ -1,0 +1,136 @@
+services:
+  # MySQL 8.0 Database
+  mysql:
+    image: mysql:8.0
+    container_name: stem_video_mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: stem_videos
+      MYSQL_USER: stem_user
+      MYSQL_PASSWORD: stem_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "stem_user",
+          "-pstem_password",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Redis 7 In-Memory Task Queue
+  redis:
+    image: redis:7-alpine
+    container_name: stem_video_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # FastAPI REST API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stem_video_api
+    restart: unless-stopped
+    command: sh -c "poetry install --no-interaction && poetry run uvicorn api.app:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=stem_user
+      - MYSQL_PASSWORD=stem_password
+      - MYSQL_DATABASE=stem_videos
+      - DATABASE_URL=mysql+pymysql://stem_user:stem_password@mysql:3306/stem_videos?charset=utf8mb4
+      - REDIS_URL=redis://redis:6379/0
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      - DEFAULT_VOICE=${DEFAULT_VOICE:-en-US-ChristopherNeural}
+      - DEFAULT_QUALITY=${DEFAULT_QUALITY:-low}
+      - OUTPUT_DIR=/app/output
+      - HOST_OUTPUT_DIR=${PWD}/output
+    volumes:
+      - ./output:/app/output
+      - ./api:/app/api
+      - ./generator:/app/generator
+      - ./task_queue:/app/task_queue
+      - ./db:/app/db
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./poetry.lock:/app/poetry.lock
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+  # Background Redis Task Queue Worker Service
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stem_video_worker
+    restart: unless-stopped
+    command: sh -c "poetry install --no-interaction && poetry run stem-video-worker"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=stem_user
+      - MYSQL_PASSWORD=stem_password
+      - MYSQL_DATABASE=stem_videos
+      - DATABASE_URL=mysql+pymysql://stem_user:stem_password@mysql:3306/stem_videos?charset=utf8mb4
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      - DEFAULT_VOICE=${DEFAULT_VOICE:-en-US-ChristopherNeural}
+      - DEFAULT_QUALITY=${DEFAULT_QUALITY:-low}
+      - OUTPUT_DIR=/app/output
+      - HOST_OUTPUT_DIR=${PWD}/output
+      - MAX_QUEUE_WORKERS=${MAX_QUEUE_WORKERS:-5}
+    volumes:
+      - ./output:/app/output
+      - ./api:/app/api
+      - ./generator:/app/generator
+      - ./task_queue:/app/task_queue
+      - ./db:/app/db
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./poetry.lock:/app/poetry.lock
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
